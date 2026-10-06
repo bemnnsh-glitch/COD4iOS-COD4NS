@@ -1,0 +1,54 @@
+name: Build unsigned IPA
+
+# Manual trigger: Actions tab -> "Build unsigned IPA" -> Run workflow.
+# If ipad-keyboard-mouse.patch sits in the repo root, it is applied before building.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply iPad keyboard/mouse patch
+        run: |
+          if [ -f ipad-keyboard-mouse.patch ]; then
+            git apply --check ipad-keyboard-mouse.patch
+            git apply ipad-keyboard-mouse.patch
+            echo "Patch applied"
+          else
+            echo "No patch file found; building the source as-is"
+          fi
+
+      - name: Select Xcode
+        run: |
+          # The README says the release was built with Xcode 27 (C++23). Use it if the runner has it,
+          # otherwise fall back to the runner's default Xcode.
+          XC=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC/Contents/Developer"; fi
+          xcodebuild -version
+          cmake --version
+
+      - name: Configure
+        run: bash tools/configure-ios.sh
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild -project build/ios/xcode-engine/KisakCOD.xcodeproj \
+            -target KisakCOD-Combined -configuration Release -sdk iphoneos \
+            -jobs 1 CODE_SIGNING_ALLOWED=NO build
+
+      - name: Package IPA
+        run: |
+          python3 tools/package-public-playtest.py \
+            --app build/ios/xcode-engine/ports/ios/Release-iphoneos/KisakCOD.app \
+            --source-root "$PWD" \
+            --output release/public
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: COD4iOS-unsigned-ipa
+          path: release/public/*.ipa
+          if-no-files-found: error
