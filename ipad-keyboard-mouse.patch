@@ -1,0 +1,416 @@
+diff -ruN a/ports/ios/app/Info.plist.in b/ports/ios/app/Info.plist.in
+--- a/ports/ios/app/Info.plist.in	2026-10-03 06:58:57.000000000 +0000
++++ b/ports/ios/app/Info.plist.in	2026-10-06 20:45:14.078949901 +0000
+@@ -23,6 +23,7 @@
+   <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+   <key>UISupportedInterfaceOrientations~ipad</key>
+   <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
++  <key>UIApplicationSupportsIndirectInputEvents</key><true/>
+   <key>GCSupportsControllerUserInteraction</key><true/>
+   <key>GCSupportedGameControllers</key>
+   <array><dict><key>ProfileName</key><string>ExtendedGamepad</string></dict></array>
+diff -ruN a/ports/ios/app/engine_app.mm b/ports/ios/app/engine_app.mm
+--- a/ports/ios/app/engine_app.mm	2026-10-03 06:58:57.000000000 +0000
++++ b/ports/ios/app/engine_app.mm	2026-10-06 20:45:29.124111441 +0000
+@@ -33,11 +33,147 @@
+ void KisakApple_TextBackspace();
+ void KisakApple_TextReturn();
+ int KisakApple_TextInputActive();
++void KisakApple_KeyEvent(int key, int down);
++void KisakApple_MouseMotion(float dx, float dy, float uiScale);
++void KisakApple_MouseButton(int button, int down);
++void KisakApple_MouseScroll(float amount);
++
++
++// ---------------------------------------------------------------------------
++// Hardware keyboard and mouse (Magic Keyboard / trackpad / USB or Bluetooth mouse).
++//
++// Keys go to the engine as the same SE_KEY events a Windows keyboard produces, so the game's own PC
++// bindings (default_mp.cfg: WASD, mouse1 = attack, ...) apply unchanged. The mouse arrives as raw
++// GCMouse deltas; the pointer is locked while a mouse is connected, so the system cursor never fights
++// the engine's own menu cursor.
++
++// UIKeyboardHIDUsage (USB HID usage page 7) -> engine key (ui/keycodes.h). 0 = not mapped.
++static int KISEngineKeyForUsage(NSInteger usage)
++{
++    if (usage >= 0x04 && usage <= 0x1D) return 'a' + static_cast<int>(usage - 0x04);   // A-Z
++    if (usage >= 0x1E && usage <= 0x26) return '1' + static_cast<int>(usage - 0x1E);   // 1-9
++    if (usage == 0x27) return '0';
++    if (usage >= 0x3A && usage <= 0x45) return 0xA7 + static_cast<int>(usage - 0x3A);  // K_F1..K_F12
++    if (usage >= 0x68 && usage <= 0x6A) return 0xB3 + static_cast<int>(usage - 0x68);  // K_F13..K_F15
++    switch (usage)
++    {
++    case 0x28: return 0x0D;   // Return        K_ENTER
++    case 0x29: return 0x1B;   // Escape        K_ESCAPE
++    case 0x2A: return 0x7F;   // Backspace     K_BACKSPACE
++    case 0x2B: return 0x09;   // Tab           K_TAB
++    case 0x2C: return 0x20;   // Space         K_SPACE
++    case 0x2D: return '-';   case 0x2E: return '=';
++    case 0x2F: return '[';   case 0x30: return ']';   case 0x31: return '\\';
++    case 0x33: return ';';   case 0x34: return '\'';
++    case 0x35: return '`';                              // console key
++    case 0x36: return ',';   case 0x37: return '.';   case 0x38: return '/';
++    case 0x39: return 0x97;   // Caps Lock     K_CAPSLOCK
++    case 0x48: return 0x99;   // Pause         K_PAUSE
++    case 0x49: return 0xA1;   // Insert        K_INS
++    case 0x4A: return 0xA5;   // Home          K_HOME
++    case 0x4B: return 0xA4;   // Page Up       K_PGUP
++    case 0x4C: return 0xA2;   // Delete        K_DEL
++    case 0x4D: return 0xA6;   // End           K_END
++    case 0x4E: return 0xA3;   // Page Down     K_PGDN
++    case 0x4F: return 0x9D;   // Right         K_RIGHTARROW
++    case 0x50: return 0x9C;   // Left          K_LEFTARROW
++    case 0x51: return 0x9B;   // Down          K_DOWNARROW
++    case 0x52: return 0x9A;   // Up            K_UPARROW
++    case 0x53: return 0xC5;   // Num Lock      K_KP_NUMLOCK
++    case 0x54: return 0xC2;   // Keypad /      K_KP_SLASH
++    case 0x55: return 0xC6;   // Keypad *      K_KP_STAR
++    case 0x56: return 0xC3;   // Keypad -      K_KP_MINUS
++    case 0x57: return 0xC4;   // Keypad +      K_KP_PLUS
++    case 0x58: return 0xBF;   // Keypad Enter  K_KP_ENTER
++    case 0x59: return 0xBC;   // Keypad 1      K_KP_END
++    case 0x5A: return 0xBD;   // Keypad 2      K_KP_DOWNARROW
++    case 0x5B: return 0xBE;   // Keypad 3      K_KP_PGDN
++    case 0x5C: return 0xB9;   // Keypad 4      K_KP_LEFTARROW
++    case 0x5D: return 0xBA;   // Keypad 5      K_KP_5
++    case 0x5E: return 0xBB;   // Keypad 6      K_KP_RIGHTARROW
++    case 0x5F: return 0xB6;   // Keypad 7      K_KP_HOME
++    case 0x60: return 0xB7;   // Keypad 8      K_KP_UPARROW
++    case 0x61: return 0xB8;   // Keypad 9      K_KP_PGUP
++    case 0x62: return 0xC0;   // Keypad 0      K_KP_INS
++    case 0x63: return 0xC1;   // Keypad .      K_KP_DEL
++    case 0x67: return 0xC7;   // Keypad =      K_KP_EQUALS
++    case 0xE0: case 0xE4: return 0x9F;   // Ctrl   K_CTRL
++    case 0xE1: case 0xE5: return 0xA0;   // Shift  K_SHIFT
++    case 0xE2: case 0xE6: return 0x9E;   // Alt    K_ALT
++    default: return 0;        // Command/Globe and anything else stay with iPadOS
++    }
++}
++
++@interface KISKeyboardMouseInput : NSObject
++@property(nonatomic,readonly) BOOL mouseConnected;
++@property(nonatomic,weak) UIView *view;               // for the points -> render pixels scale
++@property(nonatomic,copy) void (^changed)(void);      // mouse connected/disconnected
++- (void)start;
++@end
++
++@implementation KISKeyboardMouseInput
++- (void)start
++{
++    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
++    [center addObserver:self selector:@selector(mouseChanged:) name:GCMouseDidConnectNotification object:nil];
++    [center addObserver:self selector:@selector(mouseChanged:) name:GCMouseDidDisconnectNotification object:nil];
++    [self mouseChanged:nil];
++}
++- (float)uiScale
++{
++    UIView *view = self.view;
++    const CGFloat width = view.bounds.size.width;
++    if (!view || width <= 0) return 1.0f;
++    return static_cast<float>(((CAMetalLayer *)view.layer).drawableSize.width / width);
++}
++- (void)bind:(GCMouse *)mouse
++{
++    GCMouseInput *input = mouse.mouseInput;
++    if (!input) return;
++    __weak KISKeyboardMouseInput *weakSelf = self;
++    input.mouseMovedHandler = ^(GCMouseInput *m, float dx, float dy) {
++        (void)m;
++        // GameController reports +y as up; the engine, like Windows, wants +y as down.
++        KisakApple_MouseMotion(dx, -dy, [weakSelf uiScale]);
++    };
++    GCControllerButtonInput *buttons[] = { input.leftButton, input.rightButton, input.middleButton };
++    for (int i = 0; i < 3; ++i)
++        buttons[i].pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) {
++            (void)b; (void)v;
++            KisakApple_MouseButton(i, pressed);
++        };
++    NSArray<GCControllerButtonInput *> *aux = input.auxiliaryButtons;
++    for (NSUInteger i = 0; i < aux.count && i < 2; ++i)
++        aux[i].pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) {
++            (void)b; (void)v;
++            KisakApple_MouseButton(3 + static_cast<int>(i), pressed);
++        };
++    input.scroll.yAxis.valueChangedHandler = ^(GCControllerAxisInput *axis, float value) {
++        (void)axis;
++        KisakApple_MouseScroll(value);
++    };
++}
++- (void)mouseChanged:(NSNotification *)notification
++{
++    (void)notification;
++    for (GCMouse *mouse in GCMouse.mice) [self bind:mouse];
++    const BOOL connected = GCMouse.mice.count > 0;
++    if (connected != _mouseConnected)
++    {
++        _mouseConnected = connected;
++        fprintf(stderr, "Mouse: %s\n", connected ? "connected" : "disconnected");
++        if (self.changed) self.changed();
++    }
++}
++- (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; }
++@end
+ 
+ @interface KISControllerInput : NSObject
+ - (void)start;
+ - (void)publish;
+ @property(nonatomic,strong) KISTouchControls *touchControls;
++// YES while a mouse is connected: the on-screen controls would only get in the way.
++@property(nonatomic) BOOL suppressTouchControls;
+ @end
+ 
+ @implementation KISControllerInput {
+@@ -49,9 +185,9 @@
+ {
+     using namespace kisak::controller;
+     Snapshot sample;
+-    [self.touchControls setAvailable:_active && !_controller && !KisakApple_TextInputActive()
++    [self.touchControls setAvailable:_active && !_controller && !self.suppressTouchControls && !KisakApple_TextInputActive()
+                             context:KisakApple_ControllerTouchContext()];
+-    if (_active && !_controller) sample=[self.touchControls sample];
++    if (_active && !_controller && !self.suppressTouchControls) sample=[self.touchControls sample];
+     GCExtendedGamepad *pad = _controller.extendedGamepad;
+     if (_active && pad) {
+         sample.connected = true;
+@@ -209,6 +345,7 @@
+ // responder either way so a hardware keyboard always reaches the game; an
+ // empty input view hides the on-screen keyboard when no text field is active.
+ @property(nonatomic) BOOL wantsKeyboard;
++- (void)releaseAllKeys;   // key-up for everything still held (app lost focus)
+ @end
+ 
+ @implementation KISEngineView
+@@ -221,6 +358,9 @@
+     UITouch *touch = touches.anyObject;
+     if (!touch)
+         return;
++    // A trackpad/mouse click also arrives as a touch; the GCMouse path already handles it.
++    if (touch.type == UITouchTypeIndirectPointer)
++        return;
+     const CGPoint point = [touch locationInView:self];
+     if (phase != 1)
+         fprintf(stderr, "Touch: phase=%d point=%.1f,%.1f\n", phase, point.x, point.y);
+@@ -232,6 +372,65 @@
+                          static_cast<float>(point.y * pixels.height / bounds.height));
+ }
+ 
++// Hardware keyboard. Mirrors Windows: every key is an SE_KEY down/up, and a printable key also queues
++// an SE_CHAR on key-down (console and text fields consume those). The soft keyboard still goes through
++// insertText:/deleteBackward below. Held keys are tracked so they can be released if the app loses focus.
++- (NSMutableSet<NSNumber *> *)heldKeys
++{
++    static NSMutableSet<NSNumber *> *held = [NSMutableSet new];
++    return held;
++}
++- (void)handlePresses:(NSSet<UIPress *> *)presses down:(BOOL)down
++{
++    NSMutableSet<NSNumber *> *held = [self heldKeys];
++    for (UIPress *press in presses)
++    {
++        UIKey *uiKey = press.key;
++        if (!uiKey) continue;
++        const int key = KISEngineKeyForUsage(uiKey.keyCode);
++        if (!key) continue;
++        NSNumber *tag = @(key);
++        if (down)
++        {
++            [held addObject:tag];
++            KisakApple_KeyEvent(key, 1);
++            const UIKeyModifierFlags command = UIKeyModifierCommand | UIKeyModifierControl;
++            NSString *characters = uiKey.characters;
++            if (!(uiKey.modifierFlags & command) && characters.length == 1)
++                KisakApple_TextInput(characters.UTF8String);   // filters to printable ASCII
++        }
++        else if ([held containsObject:tag])
++        {
++            [held removeObject:tag];
++            KisakApple_KeyEvent(key, 0);
++        }
++    }
++}
++- (void)releaseAllKeys
++{
++    NSMutableSet<NSNumber *> *held = [self heldKeys];
++    for (NSNumber *key in held) KisakApple_KeyEvent(key.intValue, 0);
++    [held removeAllObjects];
++}
++- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event
++{
++    NSMutableSet<UIPress *> *unhandled = [NSMutableSet set];
++    for (UIPress *press in presses)
++        if (!press.key || !KISEngineKeyForUsage(press.key.keyCode)) [unhandled addObject:press];
++    [self handlePresses:presses down:YES];
++    if (unhandled.count) [super pressesBegan:unhandled withEvent:event];   // leave Command/Globe shortcuts to iPadOS
++}
++- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event
++{
++    [self handlePresses:presses down:NO];
++    [super pressesEnded:presses withEvent:event];
++}
++- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event
++{
++    [self handlePresses:presses down:NO];
++    [super pressesCancelled:presses withEvent:event];
++}
++
+ - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self forwardTouches:touches phase:0]; }
+ - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self forwardTouches:touches phase:1]; }
+ - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self forwardTouches:touches phase:2]; }
+@@ -294,6 +493,7 @@
+     BOOL _preparingPatch, _patchReady;
+     BOOL _engineEditing;
+     KISControllerInput *_controllerInput;
++    KISKeyboardMouseInput *_kbm;
+     KISTouchControls *_touchControls;
+     CADisplayLink *_displayLink;
+ }
+@@ -434,6 +634,21 @@
+         __weak KISControllerInput *input=_controllerInput;
+         _touchControls.inputChanged=^{ [input publish]; };
+         [_controllerInput start];
++        _kbm = [KISKeyboardMouseInput new];
++        _kbm.view = _engineView;
++        __weak KISEngineViewController *weakSelf = self;
++        _kbm.changed = ^{
++            KISEngineViewController *strongSelf = weakSelf;
++            if (!strongSelf) return;
++            strongSelf->_controllerInput.suppressTouchControls = strongSelf->_kbm.mouseConnected;
++            [strongSelf->_controllerInput publish];
++            [strongSelf setNeedsUpdateOfPrefersPointerLocked];
++        };
++        [_kbm start];
++        // Release held keys if the app loses focus, or the game would keep running forward.
++        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil
++                                                         queue:NSOperationQueue.mainQueue
++                                                    usingBlock:^(NSNotification *note) { (void)note; [[weakSelf engineViewForKeys] releaseAllKeys]; }];
+         // The engine draws into this view now; the label would cover the menu.
+         _status.hidden = YES;
+         [_engineView becomeFirstResponder];
+@@ -493,6 +708,9 @@
+     fprintf(stderr, "Keyboard: toggled %s by two-finger tap\n", _engineView.wantsKeyboard ? "on" : "off");
+ }
+ 
++// Raw, relative mouse look. Only honoured in a full-screen window (not Split View / Slide Over).
++- (BOOL)prefersPointerLocked { return _kbm.mouseConnected; }
++- (KISEngineView *)engineViewForKeys { return _engineView; }
+ - (BOOL)prefersStatusBarHidden { return YES; }
+ - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+ - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+diff -ruN a/ports/ios/engine/apple_sys.cpp b/ports/ios/engine/apple_sys.cpp
+--- a/ports/ios/engine/apple_sys.cpp	2026-10-03 06:58:57.000000000 +0000
++++ b/ports/ios/engine/apple_sys.cpp	2026-10-06 20:44:28.740622418 +0000
+@@ -362,8 +362,21 @@
+     int x;
+     int y;
+ };
++// Hardware mouse (iPad pointer/trackpad). Replayed on the engine thread, in order, from IN_Frame:
++// CL_MouseEvent is not safe to call from the UI thread, unlike Sys_QueEvent.
++struct KisakMouseEvent
++{
++    int kind;     // 0 motion, 1 button, 2 scroll
++    float dx, dy; // motion in points (dy: positive = down); scroll amount in dy (positive = up)
++    float scale;  // points -> render-target pixels, for the menu cursor only
++    int key;      // button: K_MOUSE1..
++    int down;
++};
+ std::mutex g_touchLock;
+ std::vector<KisakTouch> g_touches;
++std::vector<KisakMouseEvent> g_mouseEvents; // guarded by g_touchLock
++float g_mouseRemainderX = 0.0f;
++float g_mouseRemainderY = 0.0f;
+ int g_cursorX = 0;
+ int g_cursorY = 0;
+ bool g_haveCursor = false;
+@@ -407,14 +420,92 @@
+     g_touches.push_back(KisakTouch{phase, static_cast<int>(x), static_cast<int>(y)});
+ }
+ 
++// Hardware keyboard and mouse, called from the launcher (UI thread).
++void KisakApple_KeyEvent(int key, int down)
++{
++    if (key > 0 && key < K_LAST_KEY)
++        Sys_QueEvent(0, SE_KEY, key, down ? 1 : 0, 0, nullptr);
++}
++
++void KisakApple_MouseMotion(float dx, float dy, float uiScale)
++{
++    std::lock_guard<std::mutex> guard(g_touchLock);
++    g_mouseEvents.push_back(KisakMouseEvent{0, dx, dy, uiScale, 0, 0});
++}
++
++void KisakApple_MouseButton(int button, int down) // 0 left, 1 right, 2 middle, 3/4 side buttons
++{
++    if (button < 0 || button > 4)
++        return;
++    std::lock_guard<std::mutex> guard(g_touchLock);
++    g_mouseEvents.push_back(KisakMouseEvent{1, 0, 0, 1, K_MOUSE1 + button, down ? 1 : 0});
++}
++
++void KisakApple_MouseScroll(float amount) // positive = wheel up
++{
++    std::lock_guard<std::mutex> guard(g_touchLock);
++    g_mouseEvents.push_back(KisakMouseEvent{2, 0, amount, 1, 0, 0});
++}
++
++bool KisakApple_GetDisplaySize(int *width, int *height);
++
++// Replays queued mouse events on the engine thread. CL_MouseEvent takes both an absolute position (menus,
++// render-target pixels) and a raw delta (gameplay look), so the cursor is clamped to the screen while the
++// delta is passed through untouched - clamping it would stall looking at the screen edge.
++static void KisakApple_ReplayMouse(const std::vector<KisakMouseEvent> &events)
++{
++    int width = 0, height = 0;
++    KisakApple_GetDisplaySize(&width, &height);
++    const int maxX = width > 0 ? width - 1 : 0;
++    const int maxY = height > 0 ? height - 1 : 0;
++    for (const KisakMouseEvent &event : events)
++    {
++        if (!g_haveCursor)
++        {
++            g_cursorX = width / 2;
++            g_cursorY = height / 2;
++            g_haveCursor = true;
++        }
++        if (event.kind == 0)
++        {
++            // Carry the sub-count remainder so slow, precise movement is not rounded away.
++            const float totalX = event.dx + g_mouseRemainderX;
++            const float totalY = event.dy + g_mouseRemainderY;
++            const int ix = static_cast<int>(std::lround(totalX));
++            const int iy = static_cast<int>(std::lround(totalY));
++            g_mouseRemainderX = totalX - ix;
++            g_mouseRemainderY = totalY - iy;
++            g_cursorX = std::clamp(g_cursorX + static_cast<int>(std::lround(event.dx * event.scale)), 0, maxX);
++            g_cursorY = std::clamp(g_cursorY + static_cast<int>(std::lround(event.dy * event.scale)), 0, maxY);
++            if (ix || iy)
++                CL_MouseEvent(g_cursorX, g_cursorY, ix, iy);
++        }
++        else if (event.kind == 1)
++        {
++            // Move first so a click lands where the cursor is, as the touch path does.
++            CL_MouseEvent(g_cursorX, g_cursorY, 0, 0);
++            Sys_QueEvent(0, SE_KEY, event.key, event.down, 0, nullptr);
++        }
++        else if (event.dy != 0.0f)
++        {
++            const int wheel = event.dy > 0.0f ? K_MWHEELUP : K_MWHEELDOWN;
++            Sys_QueEvent(0, SE_KEY, wheel, 1, 0, nullptr);
++            Sys_QueEvent(0, SE_KEY, wheel, 0, 0, nullptr);
++        }
++    }
++}
++
+ void IN_Frame()
+ {
+     KisakApple_ControllerFrame();
+     std::vector<KisakTouch> touches;
++    std::vector<KisakMouseEvent> mouse;
+     {
+         std::lock_guard<std::mutex> guard(g_touchLock);
+         touches.swap(g_touches);
++        mouse.swap(g_mouseEvents);
+     }
++    KisakApple_ReplayMouse(mouse);
+     for (const KisakTouch &touch : touches)
+     {
+         const int dx = g_haveCursor ? touch.x - g_cursorX : 0;
